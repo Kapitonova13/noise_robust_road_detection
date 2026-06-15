@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Road Defects Detection - Ensemble of 3 Models</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1> Детекция дефектов дорожного покрытия</h1>
+        <!-- <p class="subtitle">Ансамбль из 3 моделей: YOLO Clean | YOLO Noisy | RT-DETR + WBF (равные веса)</p> -->
+        
+        <!-- Область загрузки -->
+        <div class="upload-area" id="upload-area">
+            <form id="upload-form">
+                <div class="file-input-wrapper">
+                    <input type="file" id="image-input" name="image" accept="image/jpeg,image/png" required>
+                    <label for="image-input" class="file-label" id="file-label">📁 Выберите изображение</label>
+                </div>
+                <button type="submit" class="btn" id="analyze-btn">🔍 Анализировать</button>
+            </form>
+            <div id="selected-file" class="selected-file" style="display: none;">
+                📄 Выбран файл: <span id="filename-display"></span>
+            </div>
+        </div>
+        
+        <!-- Легенда цветов классов -->
+        <div class="legend-section">
+            
+            <div class="legend-grid">
+                <div class="legend-item"><span class="color-box" style="background-color: #00ff00;"></span> D00 (Продольная трещина)</div>
+                <div class="legend-item"><span class="color-box" style="background-color: #ff0000;"></span> D10 (Поперечная трещина)</div>
+                <div class="legend-item"><span class="color-box" style="background-color: #0000ff;"></span> D20 (Сетка трещин)</div>
+                <div class="legend-item"><span class="color-box" style="background-color: #ffff00;"></span> D40 (Выбоина)</div>
+                <div class="legend-item"><span class="color-box" style="background-color: #ff00ff;"></span> Repair (Заплатка/ремонт)</div>
+            </div>
+        </div>
+        
+        <!-- Результаты -->
+        <div id="results" style="display: none;">
+            <div class="result-section">
+                <h2> Исходное изображение</h2>
+                <div class="image-container">
+                    <img id="original-img" src="" alt="Original">
+                </div>
+            </div>
+            
+            <div class="result-section">
+                <h2> Предсказания отдельных моделей</h2>
+                <div class="models-grid">
+                    <div class="model-card">
+                        <h3>YOLO (Clean)</h3>
+                        <img id="model1-img" src="" alt="Model 1">
+                        <p class="stats" id="model1-stats"></p>
+                    </div>
+                    <div class="model-card">
+                        <h3>YOLO (Noisy)</h3>
+                        <img id="model2-img" src="" alt="Model 2">
+                        <p class="stats" id="model2-stats"></p>
+                    </div>
+                    <div class="model-card">
+                        <h3>RT-DETR</h3>
+                        <img id="model3-img" src="" alt="Model 3">
+                        <p class="stats" id="model3-stats"></p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="result-section">
+                <h2> Ансамбль (Weighted Boxes Fusion)</h2>
+                
+                <!-- Бегунок уверенности -->
+                <div class="confidence-slider-container">
+                    <label for="confidence-slider">🔧 Порог уверенности: <span id="confidence-value">0.00</span></label>
+                    <input type="range" id="confidence-slider" min="0" max="100" step="1" value="0">
+                    <p class="slider-hint">Двигайте ползунок, чтобы фильтровать рамки с низкой уверенностью</p>
+                </div>
+                
+                <div class="ensemble-layout">
+                    <div class="ensemble-image">
+                        <canvas id="ensemble-canvas" style="width: 100%; border-radius: 10px;"></canvas>
+                    </div>
+                    <div class="ensemble-objects">
+                        <h3>📋 Обнаруженные объекты</h3>
+                        <div id="objects-list" class="objects-list">
+                            <!-- Список объектов будет здесь -->
+                        </div>
+                    </div>
+                </div>
+                <p class="ensemble-stats" id="ensemble-stats"></p>
+            </div>
+        </div>
+        
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Анализ изображения...</p>
+        </div>
+        
+        <div id="error" class="error" style="display: none;"></div>
+    </div>
+    
+    <script>
+        const resultsDiv = document.getElementById('results');
+        const loadingDiv = document.getElementById('loading');
+        const errorDiv = document.getElementById('error');
+        const uploadForm = document.getElementById('upload-form');
+        const fileInput = document.getElementById('image-input');
+        const filenameDisplay = document.getElementById('filename-display');
+        const selectedFileDiv = document.getElementById('selected-file');
+        const fileLabel = document.getElementById('file-label');
+        const confidenceSlider = document.getElementById('confidence-slider');
+        const confidenceValue = document.getElementById('confidence-value');
+        
+        // Переменные для хранения данных
+        let originalImageForCanvas = null;  // Чистое изображение для Canvas
+        let ensembleBoxes = [];              // Все боксы от ансамбля
+        
+        // Цвета классов
+        const classColors = {
+            0: '#00ff00',  // D00 - зеленый
+            1: '#ff0000',  // D10 - красный
+            2: '#0000ff',  // D20 - синий
+            3: '#ffff00',  // D40 - желтый
+            4: '#ff00ff'   // Repair - пурпурный
+        };
+        
+        const classNames = {
+            0: 'D00',
+            1: 'D10',
+            2: 'D20',
+            3: 'D40',
+            4: 'Repair'
+        };
+        
+        // Отображение выбранного файла
+        fileInput.addEventListener('change', function() {
+            if (this.files && this.files[0]) {
+                filenameDisplay.textContent = this.files[0].name;
+                selectedFileDiv.style.display = 'block';
+                fileLabel.innerHTML = '📄 Файл выбран';
+            } else {
+                selectedFileDiv.style.display = 'none';
+                fileLabel.innerHTML = '📁 Выберите изображение';
+            }
+        });
+        
+        // Загрузка файла
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!fileInput.files.length) return;
+            
+            const formData = new FormData();
+            formData.append('image', fileInput.files[0]);
+            
+            await sendRequest('/predict', formData);
+        });
+        
+        // Функция отрисовки на Canvas (чистое изображение + рамки)
+        function drawCanvasWithThreshold(threshold) {
+            const canvas = document.getElementById('ensemble-canvas');
+            const ctx = canvas.getContext('2d');
+            
+            if (!originalImageForCanvas || !originalImageForCanvas.complete || originalImageForCanvas.naturalWidth === 0) {
+                console.error('Изображение не загружено');
+                return;
+            }
+            
+            // Устанавливаем размеры canvas под изображение
+            canvas.width = originalImageForCanvas.naturalWidth;
+            canvas.height = originalImageForCanvas.naturalHeight;
+            
+            // Рисуем чистое изображение (без рамок!)
+            ctx.drawImage(originalImageForCanvas, 0, 0, canvas.width, canvas.height);
+            
+            // Фильтруем боксы по порогу
+            const filteredBoxes = ensembleBoxes.filter(box => box.score >= threshold);
+            
+            // Рисуем каждую рамку поверх изображения
+            filteredBoxes.forEach(box => {
+                const [x1, y1, x2, y2] = box.bbox;
+                const color = classColors[box.class] || '#ffffff';
+                const className = classNames[box.class] || `Class ${box.class}`;
+                const score = box.score;
+                
+                // Рисуем прямоугольник
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                
+                // Подготовка текста
+                const text = `${className}: ${score.toFixed(2)}`;
+                ctx.font = 'bold 16px "Segoe UI"';
+                const textMetrics = ctx.measureText(text);
+                const textWidth = textMetrics.width;
+                const textHeight = 20;
+                const padding = 4;
+                
+                // Позиция текста (над рамкой, если есть место, иначе под рамкой)
+                let textY = y1 - 5;
+                let isAbove = true;
+                
+                // Если рамка слишком близко к верху, рисуем текст под рамкой
+                if (y1 - textHeight - padding < 0) {
+                    textY = y2 + textHeight;
+                    isAbove = false;
+                }
+                
+                // Рисуем фон для текста
+                ctx.fillStyle = color;
+                if (isAbove) {
+                    ctx.fillRect(x1, y1 - textHeight - padding, textWidth + padding * 2, textHeight + padding);
+                    ctx.fillStyle = '#000000';
+                    ctx.fillText(text, x1 + padding, y1 - padding);
+                } else {
+                    ctx.fillRect(x1, y2 + padding, textWidth + padding * 2, textHeight + padding);
+                    ctx.fillStyle = '#000000';
+                    ctx.fillText(text, x1 + padding, y2 + textHeight + padding - 4);
+                }
+            });
+            
+            // Обновляем статистику
+            document.getElementById('ensemble-stats').innerHTML = `Обнаружено объектов: ${filteredBoxes.length} (при пороге ${threshold.toFixed(2)})`;
+        }
+        
+        // Обработка бегунка уверенности
+        confidenceSlider.addEventListener('input', function() {
+            const threshold = this.value / 100;
+            confidenceValue.textContent = threshold.toFixed(2);
+            
+            // Фильтруем и обновляем список объектов справа
+            const filteredObjects = ensembleBoxes.filter(box => box.score >= threshold);
+            
+            const objectsListDiv = document.getElementById('objects-list');
+            if (filteredObjects.length === 0) {
+                objectsListDiv.innerHTML = '<p class="no-objects">❌ Нет объектов выше выбранного порога</p>';
+            } else {
+                objectsListDiv.innerHTML = filteredObjects.map(obj => {
+                    const color = classColors[obj.class] || '#cccccc';
+                    const className = classNames[obj.class] || `Class ${obj.class}`;
+                    return `
+                        <div class="object-item">
+                            <span class="object-class" style="border-left-color: ${color}">${className}</span>
+                            <span class="object-confidence">${(obj.score * 100).toFixed(1)}%</span>
+                        </div>
+                    `;
+                }).join('');
+            }
+            
+            // Перерисовываем Canvas с новым порогом
+            drawCanvasWithThreshold(threshold);
+        });
+        
+        async function sendRequest(url, body, contentType = 'multipart/form-data') {
+            loadingDiv.style.display = 'flex';
+            resultsDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
+            
+            try {
+                const options = { method: 'POST' };
+                if (contentType === 'application/json') {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = body;
+                } else {
+                    options.body = body;
+                }
+                
+                const response = await fetch(url, options);
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                // Отображение статических изображений
+                document.getElementById('original-img').src = `data:image/jpeg;base64,${data.original}`;
+                document.getElementById('model1-img').src = `data:image/jpeg;base64,${data.model1}`;
+                document.getElementById('model2-img').src = `data:image/jpeg;base64,${data.model2}`;
+                document.getElementById('model3-img').src = `data:image/jpeg;base64,${data.model3}`;
+                
+                document.getElementById('model1-stats').innerHTML = `Обнаружено объектов: ${data.stats.model1_count}`;
+                document.getElementById('model2-stats').innerHTML = `Обнаружено объектов: ${data.stats.model2_count}`;
+                document.getElementById('model3-stats').innerHTML = `Обнаружено объектов: ${data.stats.model3_count}`;
+                
+                // Сохраняем боксы для отрисовки
+                ensembleBoxes = data.ensemble_boxes || [];
+                
+                // Загружаем чистое изображение (без рамок) для Canvas
+                originalImageForCanvas = new Image();
+                originalImageForCanvas.onload = () => {
+                    // Инициализируем бегунок
+                    confidenceSlider.value = 0;
+                    confidenceValue.textContent = '0.00';
+                    
+                    // Рисуем начальное состояние (все рамки)
+                    drawCanvasWithThreshold(0);
+                    
+                    // Заполняем список объектов (все)
+                    const objectsListDiv = document.getElementById('objects-list');
+                    if (ensembleBoxes.length === 0) {
+                        objectsListDiv.innerHTML = '<p class="no-objects">❌ Объекты не обнаружены</p>';
+                    } else {
+                        objectsListDiv.innerHTML = ensembleBoxes.map(obj => {
+                            const color = classColors[obj.class] || '#cccccc';
+                            const className = classNames[obj.class] || `Class ${obj.class}`;
+                            return `
+                                <div class="object-item">
+                                    <span class="object-class" style="border-left-color: ${color}">${className}</span>
+                                    <span class="object-confidence">${(obj.score * 100).toFixed(1)}%</span>
+                                </div>
+                            `;
+                        }).join('');
+                    }
+                    
+                    document.getElementById('ensemble-stats').innerHTML = `Обнаружено объектов: ${ensembleBoxes.length}`;
+                };
+                
+                //  используем чистое изображение, а не то, что с рамками
+                originalImageForCanvas.src = `data:image/jpeg;base64,${data.ensemble_clean}`;
+                
+                resultsDiv.style.display = 'block';
+                
+            } catch (err) {
+                errorDiv.textContent = `Ошибка: ${err.message}`;
+                errorDiv.style.display = 'block';
+            } finally {
+                loadingDiv.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
