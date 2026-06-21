@@ -5,9 +5,9 @@ from ultralytics import YOLO, RTDETR
 from ensemble_utils import get_predictions, ensemble_with_wbf, draw_boxes
 
 # Пути к моделям
-MODEL1_PATH = "C:/Users/anyak/Desktop/Study/dipl/w-sa/an/yolo26s_china_new/yolo26s_china_new/weights/best.pt"
-MODEL2_PATH = "C:/Users/anyak/Desktop/Study/dipl/w-sa/an/yolo26s_china_new_noisy/yolo26s_china_new_noisy/weights/best.pt"
-MODEL3_PATH = "C:/Users/anyak/Desktop/Study/dipl/w-sa/an/rtdetr_new_china_bezmos/rtdetr_new_china_bezmos/weights/best.pt"
+MODEL1_PATH = "yolo26s_best.pt"
+MODEL2_PATH = "yolo26s_noisy_best.pt"
+MODEL3_PATH = "rtdetr_best.pt"
 
 # Имена классов
 CLASS_NAMES = {
